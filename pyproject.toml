@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai3-cr-agent"
+version = "0.1.0"
+description = "Cold-start minimal Code Review Agent in Python"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "Pygments>=2.18"
+]
+authors = [
+  { name = "AI3 CR Agent" }
+]
+
+[project.scripts]
+ai3-cr-agent = "ai3_cr_agent.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

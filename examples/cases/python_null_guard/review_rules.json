@@ -1,0 +1,10 @@
+{
+  "rules": [
+    "Focus on changed code only.",
+    "Prioritize correctness, security, and maintainability findings.",
+    "Do not raise style-only comments.",
+    "Every finding must include concrete evidence from the diff or local context.",
+    "Prefer the smallest context that is sufficient to justify the review comment."
+  ]
+}
+
