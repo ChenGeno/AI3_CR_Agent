@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency fallback
     HtmlFormatter = None
     JsonLexer = None
 
-from ai3_cr_agent.domain.models import ReviewSkill
+from ai3_cr_agent.domain.models import ReviewBatch, ReviewSkill
 
 
 def render_admin_input_page(
@@ -23,6 +23,7 @@ def render_admin_input_page(
     registered_skills: list[ReviewSkill],
     active_skills: list[ReviewSkill],
     agent_input: dict[str, object],
+    review_batches: list[ReviewBatch],
 ) -> str:
     pretty_json = json.dumps(agent_input, indent=2, ensure_ascii=False)
     code_html, pygments_css = _render_json_block(pretty_json)
@@ -33,6 +34,7 @@ def render_admin_input_page(
         _render_skill_card(skill, active=skill.skill_id in active_skill_ids)
         for skill in registered_skills
     ) or '<div class="empty-skills">当前没有注册任何 Skills。</div>'
+    batch_cards = "".join(_render_batch_card(batch) for batch in review_batches)
     return f"""<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -189,6 +191,58 @@ def render_admin_input_page(
         color: var(--muted);
         font-size: 14px;
       }}
+      .batch-panel {{
+        margin-bottom: 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        overflow: hidden;
+      }}
+      .batch-body {{
+        padding: 16px;
+        background: #fff;
+      }}
+      .batch-summary {{
+        margin-bottom: 14px;
+        color: var(--muted);
+        font-size: 14px;
+      }}
+      .batch-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 12px;
+      }}
+      .batch-card {{
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 14px;
+        background: #fff;
+      }}
+      .batch-card h3 {{
+        margin: 0;
+        font-size: 15px;
+      }}
+      .batch-meta {{
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }}
+      .batch-tags {{
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }}
+      .batch-tag {{
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: var(--bg-soft);
+        color: var(--text);
+        font-size: 12px;
+        font-weight: 600;
+      }}
       .code-shell {{
         overflow: auto;
         background: #ffffff;
@@ -236,6 +290,15 @@ def render_admin_input_page(
         <div class="skills-body">
           <div class="skills-grid">
             {skill_cards}
+          </div>
+        </div>
+      </section>
+      <section class="batch-panel">
+        <div class="panel-head">分层批处理计划</div>
+        <div class="batch-body">
+          <div class="batch-summary">共规划 {len(review_batches)} 个批次，生成页会按批次实时更新执行状态。</div>
+          <div class="batch-grid">
+            {batch_cards}
           </div>
         </div>
       </section>
@@ -292,5 +355,23 @@ def _render_skill_card(skill: ReviewSkill, *, active: bool) -> str:
           <summary>查看 Skill 内容</summary>
           <div class="skill-content">{html.escape(skill.content)}</div>
         </details>
+      </article>
+    """
+
+
+def _render_batch_card(batch: ReviewBatch) -> str:
+    files = ", ".join(batch.file_paths)
+    symbols = " / ".join(batch.symbol_names) if batch.symbol_names else "No symbol grouping"
+    tags = "".join(f'<span class="batch-tag">{html.escape(change_id)}</span>' for change_id in batch.change_ids)
+    return f"""
+      <article class="batch-card">
+        <h3>{html.escape(batch.batch_id)}</h3>
+        <div class="batch-meta">
+          <div>{len(batch.change_ids)} changes</div>
+          <div>Estimated tokens: {batch.estimated_tokens}</div>
+          <div>Files: {html.escape(files)}</div>
+          <div>Symbols: {html.escape(symbols)}</div>
+        </div>
+        <div class="batch-tags">{tags}</div>
       </article>
     """

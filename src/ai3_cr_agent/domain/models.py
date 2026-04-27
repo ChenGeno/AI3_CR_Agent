@@ -110,9 +110,45 @@ class Finding:
     suggestion: str
     line: int | None = None
     finding_id: str = ""
+    source_phase: str = "batch"
+    batch_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class ReviewBatch:
+    batch_id: str
+    change_ids: list[str]
+    file_paths: list[str]
+    symbol_names: list[str]
+    estimated_tokens: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class BatchReviewRun:
+    batch_id: str
+    summary: str
+    findings: list[Finding]
+    estimated_tokens: int
+    request_payload: dict[str, Any]
+    response_payload: dict[str, Any]
+    status: str = "completed"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "summary": self.summary,
+            "findings": [item.to_dict() for item in self.findings],
+            "estimated_tokens": self.estimated_tokens,
+            "request_payload": self.request_payload,
+            "response_payload": self.response_payload,
+            "status": self.status,
+        }
 
 
 @dataclass

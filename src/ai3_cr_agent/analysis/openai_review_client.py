@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from http.client import RemoteDisconnected
 from typing import Any, Callable
 from urllib.parse import urlparse
 from urllib import error, request
@@ -46,13 +47,13 @@ class OpenAIReviewClient:
         skills: list[ReviewSkill],
         on_event: Callable[[dict[str, Any]], None],
     ) -> ReviewRun:
-        on_event({"type": "status", "message": f"Connecting to model {self.config.openai_model}..."})
+        on_event({"type": "status", "message": f"正在连接模型 {self.config.openai_model}..."})
         request_payload, response_payload, response_text = self._invoke_streaming(
             agent_input=agent_input,
             skills=skills,
             on_event=on_event,
         )
-        on_event({"type": "status", "message": "Parsing model output..."})
+        on_event({"type": "status", "message": "正在解析模型输出..."})
         parsed = self._parse_response_json(response_text)
         findings = self._normalize_findings(parsed.get("findings", []), change_units)
         summary = str(parsed.get("summary", "")).strip() or _default_summary(findings)
@@ -83,7 +84,14 @@ class OpenAIReviewClient:
         if self._prefer_chat_completions():
             payload = self._build_chat_completions_payload(agent_input, skills=skills)
             if skills:
-                return payload, self._post_chat_completions_with_skills(payload, skills=skills)
+                try:
+                    return payload, self._post_chat_completions_with_skills(payload, skills=skills)
+                except RuntimeError as exc:
+                    if not _is_connection_drop_error(exc):
+                        raise
+                    fallback_agent_input = _inline_skills_into_agent_input(agent_input, skills)
+                    fallback_payload = self._build_chat_completions_payload(fallback_agent_input)
+                    return fallback_payload, self._post_chat_completions(fallback_payload)
             return payload, self._post_chat_completions(payload)
 
         payload = self._build_responses_payload(agent_input)
@@ -107,12 +115,32 @@ class OpenAIReviewClient:
         if self._prefer_chat_completions():
             payload = self._build_chat_completions_payload(agent_input, skills=skills, stream=True)
             if skills:
-                response_payload, response_text = self._post_chat_completions_with_skills_stream(
-                    payload,
-                    skills=skills,
-                    on_event=on_event,
-                )
-                return payload, response_payload, response_text
+                try:
+                    response_payload, response_text = self._post_chat_completions_with_skills_stream(
+                        payload,
+                        skills=skills,
+                        on_event=on_event,
+                    )
+                    return payload, response_payload, response_text
+                except RuntimeError as exc:
+                    if not _is_connection_drop_error(exc):
+                        raise
+                    on_event(
+                        {
+                            "type": "status",
+                            "message": "Skill 工具调用链路已断开，正在降级为内联 Skill 上下文模式...",
+                        }
+                    )
+                    fallback_agent_input = _inline_skills_into_agent_input(agent_input, skills)
+                    fallback_payload = self._build_chat_completions_payload(
+                        fallback_agent_input,
+                        stream=True,
+                    )
+                    response_payload, response_text = self._post_chat_completions_stream(
+                        fallback_payload,
+                        on_event=on_event,
+                    )
+                    return fallback_payload, response_payload, response_text
             response_payload, response_text = self._post_chat_completions_stream(payload, on_event=on_event)
             return payload, response_payload, response_text
 
@@ -124,7 +152,7 @@ class OpenAIReviewClient:
             message = str(exc)
             if "404" not in message and "url.not_found" not in message:
                 raise
-            on_event({"type": "status", "message": "Falling back to chat completions compatibility mode..."})
+            on_event({"type": "status", "message": "正在降级到 chat completions 兼容模式..."})
             fallback_payload = self._build_chat_completions_payload(agent_input, skills=skills, stream=True)
             if skills:
                 response_payload, response_text = self._post_chat_completions_with_skills_stream(
@@ -311,6 +339,8 @@ class OpenAIReviewClient:
             raise RuntimeError(f"OpenAI API request failed: {exc.code} {detail}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"OpenAI API request failed: {exc.reason}") from exc
+        except RemoteDisconnected as exc:
+            raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
 
         response_text = _strip_markdown_fence("".join(text_parts))
         if not response_text:
@@ -358,6 +388,8 @@ class OpenAIReviewClient:
             raise RuntimeError(f"OpenAI API request failed: {exc.code} {detail}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"OpenAI API request failed: {exc.reason}") from exc
+        except RemoteDisconnected as exc:
+            raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
 
         response_text = _strip_markdown_fence("".join(text_parts))
         if not response_text:
@@ -387,13 +419,20 @@ class OpenAIReviewClient:
                 text = self._extract_response_text(response)
                 if text:
                     on_event({"type": "token", "text": text})
-                return response, text
+                if text:
+                    return response, text
+                payload_without_stream = {key: value for key, value in payload.items() if key != "stream"}
+                fallback_response = self._post_chat_completions(payload_without_stream)
+                fallback_text = self._extract_response_text(fallback_response)
+                if fallback_text:
+                    on_event({"type": "token", "text": fallback_text})
+                return fallback_response, fallback_text
 
             messages.append(message)
             for tool_call in tool_calls:
                 skill_id = _extract_skill_id(tool_call)
                 if skill_id:
-                    on_event({"type": "status", "message": f"Model invoked skill: {skill_id}"})
+                    on_event({"type": "status", "message": f"模型已调用 Skill：{skill_id}"})
                 tool_result = _execute_skill_tool_call(tool_call, tool_index)
                 messages.append(tool_result)
             current_payload = dict(payload)
@@ -411,6 +450,8 @@ class OpenAIReviewClient:
             raise RuntimeError(f"OpenAI API request failed: {exc.code} {detail}") from exc
         except error.URLError as exc:
             raise RuntimeError(f"OpenAI API request failed: {exc.reason}") from exc
+        except RemoteDisconnected as exc:
+            raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
 
     def _extract_response_text(self, payload: dict[str, Any]) -> str:
         choices = payload.get("choices")
@@ -451,10 +492,14 @@ class OpenAIReviewClient:
         return _strip_markdown_fence("\n".join(parts))
 
     def _parse_response_json(self, text: str) -> dict[str, Any]:
+        normalized = _coerce_json_object_text(text)
         try:
-            payload = json.loads(text)
+            payload = json.loads(normalized)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Failed to parse OpenAI JSON review response: {exc}") from exc
+            preview = normalized[:400] if normalized else "<empty>"
+            raise RuntimeError(
+                f"Failed to parse OpenAI JSON review response: {exc}. Raw preview: {preview}"
+            ) from exc
         if not isinstance(payload, dict):
             raise RuntimeError("OpenAI JSON review response must be an object.")
         return payload
@@ -529,19 +574,31 @@ class OpenAIReviewClient:
 
 
 def _build_review_prompt(agent_input: dict[str, object]) -> str:
-    return "\n".join(
+    lines = [
+        "Review the supplied changed code only.",
+        "Apply the active skills from agent_input.active_skills as additional review criteria.",
+        "Return zero findings when no actionable issues are present.",
+        "Use only these categories: correctness, security, maintainability.",
+        "Use only these severities: high, medium, low.",
+        "Use the exact change_id values from the input when you reference a finding.",
+    ]
+    loaded_skills = agent_input.get("loaded_skill_contents", [])
+    if isinstance(loaded_skills, list) and loaded_skills:
+        lines.extend(
+            [
+                "",
+                "Loaded skill contents:",
+                json.dumps(loaded_skills, ensure_ascii=False, indent=2),
+            ]
+        )
+    lines.extend(
         [
-            "Review the supplied changed code only.",
-            "Apply the active skills from agent_input.active_skills as additional review criteria.",
-            "Return zero findings when no actionable issues are present.",
-            "Use only these categories: correctness, security, maintainability.",
-            "Use only these severities: high, medium, low.",
-            "Use the exact change_id values from the input when you reference a finding.",
             "",
             "Review input JSON:",
             json.dumps(agent_input, ensure_ascii=False, indent=2),
         ]
     )
+    return "\n".join(lines)
 
 
 def _review_response_schema() -> dict[str, Any]:
@@ -639,6 +696,19 @@ def _strip_markdown_fence(text: str) -> str:
     return stripped
 
 
+def _coerce_json_object_text(text: str) -> str:
+    stripped = _strip_markdown_fence(text)
+    if not stripped:
+        return '{"summary":"No actionable findings in the changed code.","findings":[]}'
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return stripped[start : end + 1]
+    return stripped
+
+
 def _extract_chat_delta(payload: dict[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -704,6 +774,34 @@ def _build_skill_tools(skills: list[ReviewSkill]) -> list[dict[str, Any]]:
             },
         }
     ]
+
+
+def _inline_skills_into_agent_input(
+    agent_input: dict[str, object],
+    skills: list[ReviewSkill],
+) -> dict[str, object]:
+    payload = dict(agent_input)
+    payload["loaded_skill_contents"] = [
+        {
+            "skill_id": skill.skill_id,
+            "name": skill.name,
+            "description": skill.description,
+            "content": skill.content,
+        }
+        for skill in skills
+    ]
+    return payload
+
+
+def _is_connection_drop_error(exc: RuntimeError) -> bool:
+    text = str(exc)
+    markers = [
+        "Remote end closed connection without response",
+        "RemoteDisconnected",
+        "Connection reset by peer",
+        "EOF occurred in violation of protocol",
+    ]
+    return any(marker in text for marker in markers)
 
 
 def _first_choice_message(response: dict[str, Any]) -> dict[str, Any]:
